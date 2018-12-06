@@ -1,6 +1,7 @@
 package smolder_test
 
 import (
+	"encoding/json"
 	"github.com/DusanKasan/smolder"
 	"testing"
 )
@@ -25,9 +26,9 @@ type (
 	}
 
 	Coupon struct {
-		ID    int64
-		Name  string
-		Clips []Clip
+		RRCode string
+		Name   string
+		Clips  []Clip
 	}
 
 	Clip struct {
@@ -43,23 +44,23 @@ var DB = struct {
 		CampaignIDs []int64
 	}
 	Campaigns []struct {
-		ID          int64
-		Name        string
+		ID        int64
+		Name      string
 		FlightIDs []int64
 	}
 	Flights []struct {
-		ID          int64
-		Name        string
-		CouponsIDs []int64
+		ID             int64
+		Name           string
+		CouponsRRCodes []string
 	}
 	Coupons []struct {
-		ID          int64
-		Name        string
+		RRCode  string
+		Name    string
 		ClipIDs []int64
 	}
 	Clips []struct {
-		ID          int64
-		Name        string
+		ID   int64
+		Name string
 	}
 }{
 	Users: []struct {
@@ -68,13 +69,13 @@ var DB = struct {
 		CampaignIDs []int64
 	}{
 		{
-			ID:1,
-			Name:"jozino",
+			ID:          1,
+			Name:        "jozino",
 			CampaignIDs: []int64{1, 2},
 		},
 		{
-			ID:2,
-			Name:"ferino",
+			ID:          2,
+			Name:        "ferino",
 			CampaignIDs: []int64{2},
 		},
 	},
@@ -84,45 +85,45 @@ var DB = struct {
 		FlightIDs []int64
 	}{
 		{
-			ID: 1,
-			Name: "kampan",
+			ID:        1,
+			Name:      "kampan",
 			FlightIDs: []int64{1, 2},
 		},
 		{
-			ID: 2,
-			Name: "kampania",
+			ID:        2,
+			Name:      "kampania",
 			FlightIDs: []int64{1},
 		},
 	},
 	Flights: []struct {
-		ID         int64
-		Name       string
-		CouponsIDs []int64
+		ID             int64
+		Name           string
+		CouponsRRCodes []string
 	}{
 		{
-			ID:1,
-			Name:"flajt",
-			CouponsIDs: []int64{1, 2},
+			ID:             1,
+			Name:           "flajt",
+			CouponsRRCodes: []string{"kod", "koda"},
 		},
 		{
-			ID:2,
-			Name:"flajt numero dos",
-			CouponsIDs: []int64{2},
+			ID:             2,
+			Name:           "flajt numero dos",
+			CouponsRRCodes: []string{"koda"},
 		},
 	},
 	Coupons: []struct {
-		ID      int64
+		RRCode  string
 		Name    string
 		ClipIDs []int64
 	}{
 		{
-			ID:1,
-			Name:"kupon",
+			RRCode:  "kod",
+			Name:    "kupon",
 			ClipIDs: []int64{1},
 		},
 		{
-			ID:2,
-			Name:"kjupon",
+			RRCode:  "koda",
+			Name:    "kjupon",
 			ClipIDs: []int64{1, 2},
 		},
 	},
@@ -131,12 +132,12 @@ var DB = struct {
 		Name string
 	}{
 		{
-			ID:1,
-			Name:"klippity",
+			ID:   1,
+			Name: "klippity",
 		},
 		{
-			ID:2,
-			Name:"klappity",
+			ID:   2,
+			Name: "klappity",
 		},
 	},
 }
@@ -151,7 +152,7 @@ func TestDataLoading(t *testing.T) {
 			for _, u := range DB.Users {
 				if u.ID == id {
 					usr := &User{
-						ID: u.ID,
+						ID:   u.ID,
 						Name: u.Name,
 					}
 
@@ -174,7 +175,7 @@ func TestDataLoading(t *testing.T) {
 			for _, u := range DB.Campaigns {
 				if u.ID == id {
 					usr := &Campaign{
-						ID: u.ID,
+						ID:   u.ID,
 						Name: u.Name,
 					}
 
@@ -197,11 +198,11 @@ func TestDataLoading(t *testing.T) {
 			for _, u := range DB.Flights {
 				if u.ID == id {
 					usr := &Flight{
-						ID: u.ID,
+						ID:   u.ID,
 						Name: u.Name,
 					}
 
-					l.Load(u.CouponsIDs, &usr.Coupons)
+					l.Load(u.CouponsRRCodes, &usr.Coupons)
 					m[id] = usr
 				}
 			}
@@ -212,20 +213,20 @@ func TestDataLoading(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := loader.Register(func(l smolder.Loader, ids []int64) (map[int64]*Coupon, error) {
-		t.Log("Loading Coupons for IDs", ids)
+	if err := loader.Register(func(l smolder.Loader, rrCodes []string) (map[string]*Coupon, error) {
+		t.Log("Loading Coupons for RRCodes", rrCodes)
 
-		m := map[int64]*Coupon{}
-		for _, id := range ids {
+		m := map[string]*Coupon{}
+		for _, rrCode := range rrCodes {
 			for _, u := range DB.Coupons {
-				if u.ID == id {
+				if u.RRCode == rrCode {
 					usr := &Coupon{
-						ID: u.ID,
-						Name: u.Name,
+						RRCode: u.RRCode,
+						Name:   u.Name,
 					}
 
 					l.Load(u.ClipIDs, &usr.Clips)
-					m[id] = usr
+					m[rrCode] = usr
 				}
 			}
 		}
@@ -243,7 +244,7 @@ func TestDataLoading(t *testing.T) {
 			for _, u := range DB.Clips {
 				if u.ID == id {
 					usr := &Clip{
-						ID: u.ID,
+						ID:   u.ID,
 						Name: u.Name,
 					}
 
@@ -257,14 +258,16 @@ func TestDataLoading(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	usrs := []User{}
-	err := loader.Load([]int64{1, 2}, &usrs)
+	var u []User
+	err := loader.Load([]int64{1, 2}, &u)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, u := range usrs {
-		t.Logf("%#v\n",u)
+	b, err := json.MarshalIndent(u, "", "\t")
+	if err != nil {
+		t.Fatal(err)
 	}
-}
 
+	t.Log(string(b))
+}
