@@ -8,7 +8,6 @@ import (
 )
 
 type register struct {
-	// TODO map[return type][key type]func
 	resolvers map[reflect.Type]map[reflect.Type]func(context.Context, *loader, interface{}) (interface{}, error)
 }
 
@@ -17,15 +16,23 @@ func New() *register {
 	return &register{resolvers: m}
 }
 
-// fn for type T must be:
-// 		func([]K) (map[K]*T, error)
-// 		func(context.Context, []K) (map[K]*T, error)
-// 		func(smolder.loader, []K) (map[K]*T, error)
-// 		func(context.Context, smolder.loader, []K) (map[K]*T, error)
-// 		func([]K) map[K]*T
-// 		func(context.Context, []K) map[K]*T
-// 		func(loader, []K) map[K]*T
-// 		func(context.Context, smolder.loader, []K) map[K]*T
+// fn for type T must be one of:
+// - func([]K) (map[K]*T, error)
+// - func([]K) (map[K][]*T, error)
+// - func(context.Context, []K) (map[K]*T, error)
+// - func(context.Context, []K) (map[K][]*T, error)
+// - func(smolder.loader, []K) (map[K]*T, error)
+// - func(smolder.loader, []K) (map[K]*[]T, error)
+// - func(context.Context, smolder.loader, []K) (map[K]*T, error)
+// - func(context.Context, smolder.loader, []K) (map[K][]*T, error)
+// - func([]K) map[K]*T
+// - func([]K) map[K]*[]T
+// - func(context.Context, []K) map[K]*T
+// - func(context.Context, []K) map[K]*[]T
+// - func(loader, []K) map[K]*T
+// - func(loader, []K) map[K]*[]T
+// - func(context.Context, smolder.loader, []K) map[K]*T
+// - func(context.Context, smolder.loader, []K) map[K]*[]T
 func (l *register) Register(fn interface{}) error {
 	var inTransform func(ctx context.Context, loader *loader, ids interface{}) []reflect.Value
 	var outTransform func(vals []reflect.Value) (interface{}, error)
@@ -44,6 +51,19 @@ func (l *register) Register(fn interface{}) error {
 		}
 		keyType = t.Out(0).Key()
 		outTransform = func(vals []reflect.Value) (interface{}, error) {
+			// if the map values aren't slices, create the slices with 1 item each
+			valType := t.Out(0).Elem()
+			if valType.Kind() != reflect.Slice {
+				res := reflect.MakeMap(reflect.MapOf(keyType, reflect.SliceOf(valType)))
+				for _, key := range vals[0].MapKeys() {
+					slice := reflect.New(reflect.SliceOf(valType)).Elem()
+					slice = reflect.Append(slice, vals[0].MapIndex(key))
+					res.SetMapIndex(key, slice)
+				}
+
+				return res.Interface(), nil
+			}
+
 			return vals[0].Interface(), nil
 		}
 	case 2:
@@ -60,6 +80,20 @@ func (l *register) Register(fn interface{}) error {
 			if vals[1].Interface() != nil {
 				err = vals[1].Interface().(error)
 			}
+
+			// if the map values aren't slices, create the slices with 1 item each
+			valType := t.Out(0).Elem()
+			if valType.Kind() != reflect.Slice {
+				res := reflect.MakeMap(reflect.MapOf(keyType, reflect.SliceOf(valType)))
+				for _, key := range vals[0].MapKeys() {
+					slice := reflect.New(reflect.SliceOf(valType)).Elem()
+					slice = reflect.Append(slice, vals[0].MapIndex(key))
+					res.SetMapIndex(key, slice)
+				}
+
+				return res.Interface(), err
+			}
+
 			return vals[0].Interface(), err
 		}
 	default:
@@ -122,9 +156,17 @@ func (l *register) Register(fn interface{}) error {
 	}
 
 	typ := t.Out(0).Elem()
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+
 	m := l.resolvers[typ]
 	if m == nil {
 		l.resolvers[typ] = map[reflect.Type]func(context.Context, *loader, interface{}) (interface{}, error){}
+	}
+
+	if _, ok := l.resolvers[typ][keyType]; ok {
+		return fmt.Errorf("resolver already registered for %v and key type %v", typ.String(), keyType.String())
 	}
 
 	l.resolvers[typ][keyType] = func(ctx context.Context, loader *loader, ids interface{}) (interface{}, error) {
@@ -139,33 +181,62 @@ func (l *register) Register(fn interface{}) error {
 }
 
 func (l *register) Load(ids interface{}, dst interface{}) error {
-	// TODO: handle the fact that both ids and dst can be slices or pointers, just slices for now
-	keys := reflect.TypeOf(ids)
-	if keys.Kind() != reflect.Slice {
-		return errors.New("ids must be a slice")
-	}
-
 	typ := reflect.TypeOf(dst)
-	if typ.Kind() != reflect.Ptr || typ.Elem().Kind() != reflect.Slice {
+	if typ.Kind() != reflect.Ptr {
 		return errors.New("dst must be a pointer to a slice")
 	}
+	target := typ.Elem()
 
-	target := typ.Elem().Elem()
-	resolved, err := l.resolve(ids, target)
-	if err != nil {
-		return err
-	}
-
-	slice := reflect.New(reflect.SliceOf(target)).Elem()
-	for _, k := range resolved.MapKeys() {
-		val := resolved.MapIndex(k)
-		if target.Kind() != reflect.Ptr {
-			val = val.Elem()
+	switch reflect.TypeOf(ids).Kind() {
+	case reflect.Slice:
+		if target.Kind() != reflect.Slice {
+			return errors.New("dst must be a pointer to slice when loading multiple items")
 		}
-		slice = reflect.Append(slice, val)
-	}
+		target = target.Elem()
 
-	reflect.ValueOf(dst).Elem().Set(slice)
+		resolved, err := l.resolve(ids, target)
+		if err != nil {
+			return err
+		}
+
+		slice := reflect.New(reflect.SliceOf(target)).Elem()
+		for _, k := range resolved.MapKeys() {
+			val := resolved.MapIndex(k)
+			for i := 0; i < val.Len(); i ++ {
+				vv := val.Index(i)
+				if target.Kind() != reflect.Ptr {
+					vv = vv.Elem()
+				}
+				slice = reflect.Append(slice, vv)
+			}
+		}
+
+		reflect.ValueOf(dst).Elem().Set(slice)
+	default:
+		// TODO: could also be a pointer to interface or scalar
+		if target.Kind() != reflect.Struct {
+			return errors.New("dst must be a pointer to a struct")
+		}
+
+		// build the slice of IDs (containing just the one ID) to resolve
+		slice := reflect.New(reflect.SliceOf(reflect.TypeOf(ids))).Elem()
+		slice = reflect.Append(slice, reflect.ValueOf(ids))
+
+		resolved, err := l.resolve(slice.Interface(), target)
+		if err != nil {
+			return err
+		}
+
+		switch resolved.MapIndex(resolved.MapKeys()[0]).Len() {
+		case 0:
+			return errors.New("no data found for key")
+		case 1:
+			reflect.ValueOf(dst).Elem().Set(reflect.Indirect(resolved.MapIndex(resolved.MapKeys()[0]).Index(0)))
+		default:
+			return errors.New("multiple data found for one key")
+		}
+
+	}
 	return nil
 }
 
@@ -191,11 +262,18 @@ func (l *loader) execute() error {
 	// map of return type to map of key type to map of existing keys
 	typeIds := map[reflect.Type]map[reflect.Type]map[interface{}]bool{}
 	for _, inv := range l.invocations {
-		typ := reflect.TypeOf(inv.dst).Elem().Elem()
+		typ := reflect.TypeOf(inv.dst).Elem()
+		if typ.Kind() == reflect.Slice {
+			typ = typ.Elem()
+		}
 		if typ.Kind() != reflect.Ptr {
 			typ = reflect.PtrTo(typ)
 		}
-		keyType := reflect.TypeOf(inv.ids).Elem()
+
+		keyType := reflect.TypeOf(inv.ids)
+		if keyType.Kind() == reflect.Slice {
+			keyType = keyType.Elem()
+		}
 
 		if typeInvocations[typ] == nil {
 			typeInvocations[typ] = map[reflect.Type][]invocation{}
@@ -209,8 +287,12 @@ func (l *loader) execute() error {
 			typeIds[typ][keyType] = map[interface{}]bool{}
 		}
 
-		for i := 0; i < reflect.ValueOf(inv.ids).Len(); i++ {
-			typeIds[typ][keyType][reflect.ValueOf(inv.ids).Index(i).Interface()] = true
+		if reflect.TypeOf(inv.ids).Kind() == reflect.Slice {
+			for i := 0; i < reflect.ValueOf(inv.ids).Len(); i++ {
+				typeIds[typ][keyType][reflect.ValueOf(inv.ids).Index(i).Interface()] = true
+			}
+		} else {
+			typeIds[typ][keyType][reflect.ValueOf(inv.ids).Interface()] = true
 		}
 	}
 
@@ -230,26 +312,56 @@ func (l *loader) execute() error {
 
 			// satisfy each invocation
 			for _, invocation := range invocations {
-				T := reflect.TypeOf(invocation.dst).Elem().Elem()
-				pointer := reflect.TypeOf(invocation.dst).Elem().Elem().Kind() == reflect.Ptr
+				T := reflect.TypeOf(invocation.dst).Elem()
+				if T.Kind() == reflect.Slice {
+					T = T.Elem()
+				}
+				pointer := T.Kind() == reflect.Ptr
 				if pointer {
 					T = typ.Elem()
 				}
-				slice := reflect.New(reflect.SliceOf(T)).Elem()
-				for i := 0; i < reflect.ValueOf(invocation.ids).Len(); i++ {
-					v := resolved.MapIndex(reflect.ValueOf(invocation.ids).Index(i))
-					if v.Interface() == nil {
-						return errors.New("map index not found")
+
+				if reflect.TypeOf(invocation.dst).Elem().Kind() != reflect.Slice {
+					if reflect.TypeOf(invocation.ids).Kind() == reflect.Slice {
+						return errors.New("cannot fetch multiple ids into one destination")
 					}
 
-					if !pointer {
-						v = v.Elem()
+					rv := resolved.MapIndex(reflect.ValueOf(invocation.ids))
+					switch rv.Len() {
+					case 0:
+						return errors.New("no items found for id")
+					case 1:
+						reflect.ValueOf(invocation.dst).Elem().Set(rv.Index(0).Elem())
+					default:
+						return errors.New("multiple items found for id")
+					}
+				} else {
+					ids := reflect.ValueOf(invocation.ids)
+					if reflect.TypeOf(invocation.ids).Kind() != reflect.Slice {
+						ids = reflect.New(reflect.SliceOf(reflect.TypeOf(invocation.ids))).Elem()
+						ids = reflect.Append(ids, reflect.ValueOf(invocation.ids))
 					}
 
-					slice = reflect.Append(slice, v)
+					slice := reflect.New(reflect.SliceOf(T)).Elem()
+					for i := 0; i < ids.Len(); i++ {
+						v := resolved.MapIndex(ids.Index(i))
+						if v.Interface() == nil {
+							return errors.New("map index not found")
+						}
+
+						for j := 0; j < v.Len(); j ++ {
+							vv := v.Index(j)
+
+							if !pointer {
+								vv = vv.Elem()
+							}
+
+							slice = reflect.Append(slice, vv)
+						}
+					}
+
+					reflect.ValueOf(invocation.dst).Elem().Set(slice)
 				}
-
-				reflect.ValueOf(invocation.dst).Elem().Set(slice)
 			}
 		}
 	}
@@ -258,9 +370,12 @@ func (l *loader) execute() error {
 }
 
 // Resolves the ids by calling the resolver for the passed type T or a resolver
-// for the pointer to passed type T. Returns a reflection of map[int64]*T.
+// for the pointer to passed type T. Returns a reflection of map[int64][]*T.
 func (l *register) resolve(ids interface{}, typ reflect.Type) (reflect.Value, error) {
-	// TODO: Check if ids is slice?
+	if reflect.TypeOf(ids).Kind() != reflect.Slice {
+		return reflect.Value{}, errors.New("ids must be a slice")
+	}
+
 
 	resolvers, ok := l.resolvers[typ]
 	if !ok {
